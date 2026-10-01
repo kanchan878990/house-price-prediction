@@ -1,125 +1,120 @@
-# House Price Prediction
+"""
+app.py — House Price Prediction Flask Application
+Run:  python app.py
+"""
 
-A full-stack web application that predicts house prices using a **Linear Regression** model trained on the Housing dataset.
+import os
 
-Built with **Python**, **Flask**, **scikit-learn**, and **Bootstrap 5**.
+import joblib
+import numpy as np
+import pandas as pd
+from flask import Flask, render_template, request, redirect, url_for, session
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import train_test_split
 
----
+# ── App setup ──────────────────────────────────────────────────────────────────
+app = Flask(__name__)
+app.secret_key = "housepriceapp_secret_2024"
 
-## Project Structure
+# ── Paths ──────────────────────────────────────────────────────────────────────
+BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(BASE_DIR, "model", "model.pkl")
+DATA_PATH  = os.path.join(BASE_DIR, "..", "Housing.csv")
 
-```
-house_price_app/
-├── app.py                  # Flask application
-├── requirements.txt        # Python dependencies
-├── model/
-│   ├── train.py            # Training script
-│   └── model.pkl           # Saved pipeline (generated)
-├── templates/
-│   ├── base.html           # Shared layout
-│   ├── index.html          # Prediction form
-│   ├── result.html         # Result page
-│   └── metrics.html        # Model performance page
-└── static/
-    └── style.css           # Custom CSS
-```
+# ── Load model & compute metrics once at startup ───────────────────────────────
+pipeline = joblib.load(MODEL_PATH)
 
----
+# Reload dataset to compute metrics + feature importances
+df = pd.read_csv(DATA_PATH)
+BINARY_COLS = ["mainroad", "guestroom", "basement",
+               "hotwaterheating", "airconditioning", "prefarea"]
 
-## Quick Start
+_df = df.copy()
+for col in BINARY_COLS:
+    _df[col] = _df[col].map({"yes": 1, "no": 0})
 
-### 1. Install dependencies
+X_all = _df.drop(columns=["price"])
+y_all = _df["price"]
+_, X_test, _, y_test = train_test_split(X_all, y_all, test_size=0.2, random_state=42)
 
-```bash
-pip install -r requirements.txt
-```
+y_pred  = pipeline.predict(X_test)
+METRICS = {
+    "r2":   round(r2_score(y_test, y_pred), 4),
+    "mae":  f"{mean_absolute_error(y_test, y_pred):,.0f}",
+    "rmse": f"{np.sqrt(mean_squared_error(y_test, y_pred)):,.0f}",
+}
 
-### 2. Train the model (first time only)
+# Build feature-name → coefficient table
+ohe          = pipeline.named_steps["preprocessor"].named_transformers_["cat"]
+ohe_features = list(ohe.get_feature_names_out(["furnishingstatus"]))
+feature_names = (
+    ["area", "bedrooms", "bathrooms", "stories", "parking"] +
+    BINARY_COLS +
+    ohe_features
+)
+coefficients = list(pipeline.named_steps["regressor"].coef_)
+FEATURE_COEFS = sorted(
+    zip(feature_names, [round(c, 2) for c in coefficients]),
+    key=lambda x: abs(x[1]),
+    reverse=True,
+)
 
-Run from the project root (where `Housing.csv` lives):
 
-```bash
-python house_price_app/model/train.py
-```
+# ── Helper ─────────────────────────────────────────────────────────────────────
+def _build_input_df(form):
+    """Convert raw form POST data into a DataFrame the pipeline can predict on."""
+    binary_map = {"yes": 1, "no": 0}
+    data = {
+        "area":             [int(form["area"])],
+        "bedrooms":         [int(form["bedrooms"])],
+        "bathrooms":        [int(form["bathrooms"])],
+        "stories":          [int(form["stories"])],
+        "parking":          [int(form["parking"])],
+        "mainroad":         [binary_map[form["mainroad"]]],
+        "guestroom":        [binary_map[form["guestroom"]]],
+        "basement":         [binary_map[form["basement"]]],
+        "hotwaterheating":  [binary_map[form["hotwaterheating"]]],
+        "airconditioning":  [binary_map[form["airconditioning"]]],
+        "prefarea":         [binary_map[form["prefarea"]]],
+        "furnishingstatus": [form["furnishingstatus"]],
+    }
+    return pd.DataFrame(data)
 
-This creates `house_price_app/model/model.pkl`.
 
-Expected output:
-```
-R²   : 0.6529
-MAE  : 970,043
-RMSE : 1,324,507
+# ── Routes ─────────────────────────────────────────────────────────────────────
+@app.route("/")
+def index():
+    return render_template("index.html")
 
-Model saved -> ...model.pkl
-```
 
-### 3. Start the web app
+@app.route("/predict", methods=["POST"])
+def predict():
+    input_df        = _build_input_df(request.form)
+    predicted_price = round(float(pipeline.predict(input_df)[0]))
+    session["predicted_price"] = predicted_price
+    session["input_data"]      = request.form.to_dict()
+    return redirect(url_for("result"))
 
-```bash
-cd house_price_app
-python app.py
-```
 
-Open your browser at: **http://127.0.0.1:5000**
+@app.route("/result")
+def result():
+    predicted_price = session.get("predicted_price")
+    input_data      = session.get("input_data", {})
+    if predicted_price is None:
+        return redirect(url_for("index"))
+    formatted_price = f"{predicted_price:,}"
+    return render_template("result.html",
+                           predicted_price=formatted_price,
+                           input_data=input_data)
 
----
 
-## Pages
+@app.route("/metrics")
+def metrics():
+    return render_template("metrics.html",
+                           metrics=METRICS,
+                           feature_coefs=FEATURE_COEFS)
 
-| URL | Description |
-|---|---|
-| `/` | Prediction form — enter house details |
-| `/predict` | POST endpoint — runs inference, redirects to result |
-| `/result` | Displays the predicted price + input summary |
-| `/metrics` | Model R², MAE, RMSE and feature coefficient table |
 
----
-
-## Dataset
-
-`Housing.csv` — 545 rows, 13 columns.
-
-| Feature | Type |
-|---|---|
-| area | Numeric |
-| bedrooms, bathrooms, stories, parking | Numeric |
-| mainroad, guestroom, basement, hotwaterheating, airconditioning, prefarea | Binary (yes/no) |
-| furnishingstatus | Categorical (furnished / semi-furnished / unfurnished) |
-| **price** | **Target** |
-
----
-
-## Model Details
-
-- **Algorithm**: Linear Regression (`sklearn.linear_model.LinearRegression`)
-- **Preprocessing**: Binary columns mapped to 0/1; `furnishingstatus` one-hot encoded with `drop="first"`
-- **Pipeline**: `ColumnTransformer` → `LinearRegression` (saved as a single `model.pkl`)
-- **Train/Test Split**: 80% / 20%, `random_state=42`
-
----
-
-## Future Improvements (To-Do)
-
-- [ ] Add more models: Ridge, Lasso, Random Forest, Gradient Boosting
-- [ ] Add cross-validation for more robust evaluation
-- [ ] Add feature engineering (e.g., price-per-sqft, room ratio)
-- [ ] Add EDA charts (price distribution, correlation heatmap) on the metrics page
-- [ ] Add input validation and friendly error messages on the form
-- [ ] Add a comparison page to predict multiple houses side-by-side
-- [ ] Deploy to a cloud platform (Heroku / Render / Railway)
-- [ ] Add authentication if deployed publicly
-- [ ] Export prediction history to CSV
-- [ ] Add a REST API endpoint (`/api/predict`) for programmatic access
-
----
-
-## Tech Stack
-
-| Layer | Technology |
-|---|---|
-| Language | Python 3.10+ |
-| Web Framework | Flask |
-| ML Library | scikit-learn |
-| Data Handling | pandas, numpy |
-| Model Persistence | joblib |
-| Frontend | Jinja2, Bootstrap 5 |
+# ── Entry point ────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    app.run(debug=True)
